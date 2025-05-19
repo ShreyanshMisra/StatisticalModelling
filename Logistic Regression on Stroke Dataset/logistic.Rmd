@@ -1,0 +1,271 @@
+---
+title: "Logistic Regression on Stroke Dataset"
+output:
+  html_document:
+    df_print: paged
+  pdf_document:
+    number_sections: true
+---
+
+```{r include=FALSE, messages=FALSE, warnings=FALSE}
+library(tidyverse)
+library(lmtest)
+library(caret)
+library(conflicted)
+library(MASS)
+library(caTools)
+library(car)
+library(pROC)
+```
+
+
+# Introduction
+
+The standard logistic regression function is an s-shaped curve given by:
+
+$$p= \frac{e^y}{1 + e^y}$$
+where $y=\beta_0 + \beta_1 X$ and $p$ is the probability of the event occuring. With some manipulation, the formula appears as:
+
+$$ log(\frac{p}{1-p}) = \beta_0 + \beta_1 X$$
+
+$\beta_0$ and $\beta_1$ are the regression beta coefficients, and writing the formula like it is above allows us to add more coefficients to the right side of the equation.
+
+This study focuses on predicting whether someone is likely to experience a stroke based on certain parameters. The dataset, sourced from Kaggle (https://www.kaggle.com/datasets/fedesoriano/stroke-prediction-dataset/data) contains 5,110 records of patients tested for stroke, along with whether they actually had a stroke or not. We specifically analyzed five features to determine whether someone was likely to experience a stroke or not. 
+
+Our analysis utilized several R packages for data preprocessing, modeling, and statistical testing. Using tidyverse `streamlined` data manipulation and visualization, while `lmtest` and `car` facilitated regression diagnostics and hypothesis testing. The `caret` package was used for machine learning workflows, `MASS` supported statistical modeling, and `caTools` was used for data splitting and performance evaluation.
+
+Our final model can be expressed as $$\log\left(\frac{p}{1 - p}\right) = -4.0403 - 0.1145X_1 + 1.1444X_2 + 0.9841X_3 + 1.1466X_4 - 0.2037X_5$$. While the model does not explain much of the variance, we attribute this error to an unbalanced dataset. By analyzing the ROC curve and AUC curves, our model is better than randomized guessing, but would not be useful in a clinical sense. Improvements to the model can be made through enhancements to the dataset or other optimization techniques. 
+
+
+# Data description
+
+```{r}
+data <- data.frame(read.csv("healthcare-dataset-stroke-data.csv"))
+stroke.df <- subset(data, select=-c(age, smoking_status, avg_glucose_level, bmi))
+stroke.df <- na.omit(stroke.df)
+
+cat("Data Points:", nrow(stroke.df) - sum(is.na(stroke.df)))
+```
+
+## Dataset
+
+This dataset contains patient features and whether they experienced a stroke or not. We see that there are 5110 data points, five features, and one target. From an initial analysis, there were no missing data points. 
+
+```{r }
+head(stroke.df, 3)
+```
+
+
+## Variables
+
+- gender: 	Is the patient Male or Female?
+- hypertension: Does the patient have high blood pressure?
+- heart_disease: Does the patient have a history of heart disease?
+- ever_married: Is the patient married or not?
+- Residence_type: Does the patient live in an urban or rural?
+- stroke: Did the patient experience a stroke?
+
+We can identify `stroke` as our dependent variable as the likeliness of experience a stroke is what we are predicting. The remaining 5 variables are our independent variables.
+
+
+```{r}
+# Is Male?
+stroke.df$gender[stroke.df$gender == "Male"] <- 1
+stroke.df$gender[stroke.df$gender == "Female"] <- 0
+
+# Ever Married?
+stroke.df$ever_married[stroke.df$ever_married == "Yes"] <- 1
+stroke.df$ever_married[stroke.df$ever_married == "No"] <- 0
+
+# Rural?
+stroke.df$Residence_type[stroke.df$Residence_type == "Rural"] <- 1
+stroke.df$Residence_type[stroke.df$Residence_type == "Urban"] <- 0
+
+
+stroke.df$gender = as.integer(stroke.df$gender)
+stroke.df$ever_married = as.integer(stroke.df$ever_married)
+stroke.df$Residence_type = as.integer(stroke.df$Residence_type)
+
+stroke.df <- na.omit(stroke.df)
+head(stroke.df, 5)
+```
+The dataset was encoded using one-hot encoding.
+
+```{r}
+histogram(stroke.df$gender, xlab = "Gender (Y/N)", main = "Histogram of Gender")
+histogram(stroke.df$hypertension, xlab = "Hypertension (Y/N)", main = "Histogram of Hypertension")
+histogram(stroke.df$heart_disease, xlab = "Heart Disease (Y/N)", main = "Histogram of Heart Disease")
+histogram(stroke.df$ever_married, xlab = "Ever Married (Y/N)", main = "Histogram of Married")
+histogram(stroke.df$Residence_type, xlab = "Residence Type (Urban=0/Rural=1)", main = "Histogram of Residence Type")
+histogram(stroke.df$stroke, xlab = "Stroke (Y/N)", main = "Histogram of Stroke")
+```
+
+
+
+
+# Analysis
+
+## Preliminary Model To Check Assumptions 
+```{r}
+logit_model <- glm(
+  stroke ~.,
+  family = binomial(link = "logit"), 
+  data = stroke.df
+)
+```
+
+
+## Assumptions
+
+The preliminary model was tested against the logistic regression assumption (https://r4ds.github.io/bookclub-islr/addendum---logistic-regression-assumptions.html).
+
+1.The response variable is binary
+2.Observations are independent
+3.No multicollinearity among predictors
+4.No extreme outliers
+
+### Response Variable Is Binary
+```{r}
+histogram(stroke.df$stroke, xlab='Stroke', main='Histogram of Stroke Response Variable')
+```
+The response variable Stroke - only has values 0 or 1. Thus, the response variable is binary and satisfies assumption #1. 
+
+
+### Little to No Multicollinearity
+```{r}
+vif(logit_model)
+```
+The VIF value for each feature is near 1, indicating no multicollinearity and satisfying assumption #3. 
+
+
+### Large Sample Size
+```{r}
+nrow(stroke.df) > (ncol(stroke.df) - 1) * 50
+```
+### Linear Relationship Of Features To Log Odds
+The Box-Tidwell test is used to check the linearity assumption in logistic regression for continuous predictors. However, in our case, all predictor variables are categorical (binary so 0 or 1), so the Box-Tidwell test is not applicable because it requires at least one continuous predictor. Therefore, we can omit this test from our investigation.
+
+### Validity
+
+The model largely passed the 4 assumptions of linearity for logistic functions. While we were unable to to test it against the fourth assumption, it is because all of our predictor variables are catagorical and so the test is not applicable. This does not significantly affect our modelling or prediction. 
+
+### Problem With Extreme Outliers
+```{r}
+influence <- 2 / sqrt(nrow(stroke.df))
+distance <- cooks.distance(logit_model)
+distance[distance > influence]
+```
+
+
+### Split Training & Test
+```{r}
+partition_size <- floor(0.5 * nrow(data))
+
+set.seed(101)
+decision_vector <- sample(seq_len(nrow(data)), size = partition_size)
+
+df.test <- stroke.df[-decision_vector, ]
+df.train <- stroke.df[decision_vector, ]
+
+```
+
+
+### Model
+```{r}
+model <- glm(
+  stroke ~.,
+  family = binomial(link = "logit"), 
+  data = df.train
+)
+
+summary(model)
+```
+Our model expresses the probability of a stroke, p, as 
+$$\log\left(\frac{p}{1 - p}\right) = -4.0403 - 0.1145X_1 + 1.1444X_2 + 0.9841X_3 + 1.1466X_4 - 0.2037X_5$$
+Each coefficient measures the impact of the feature on the log-odds of a stroke. Exponentiating each respective beta gives the odds ratio, or how much more likely a stroke is to occur when that beta increases by 1 unit. 
+
+
+# Model Evaluation
+From above, our model converges in 6 iterations. This is within 4-10 iterations and is a good sign. 
+
+## Null Deviance
+```{r}
+null <- glm(
+  stroke ~ 1,
+  family = binomial(link = "logit"), 
+  data = df.train
+)
+
+null_deviance <- -2*(logLik(null))
+null_deviance
+
+```
+The higher null deviance indicates the response variable, stroke, varies greatly when not considering the predictor variables. 
+
+
+## Residual Deviance
+```{r}
+residual_deviance = -2*logLik(model)
+residual_deviance
+```
+A higher residual deviance indicates our model is not a strong fit to the data. 
+
+## Reduction In Deviance
+```{r}
+reduction <- null_deviance - residual_deviance
+reduction
+```
+A smaller reduction in deviance indicates our model is not a strong fit to the data. 
+
+
+## Likelihood Ratio Test
+```{r}
+anova(null, model, test="Chisq")
+```
+Null: Restricted Model Is Adequate
+Alternative: Restricted Model Is Not Adequate
+The statistically significant p-value for all values of alpha indicates to reject the null. The fuller model is significantly better fit to the data. 
+
+## Psuedo-R^2 (McFadden)
+```{r}
+pseudo <- 1 - (logLik(model) / logLik(null))
+pseudo
+```
+Our McFadden's Psuedo-R^2 Value Is 0.0744; While logistic regression has lower standards for an acceptable value, our value still indicates a lack of fit for the data. 
+
+```{r}
+predictions <- predict(model, newdata = df.test, type = "response")
+predictions <- as.numeric(predictions > 0.5)
+
+table(predicted = predictions, actual = df.test$stroke)
+```
+The table indicates ~127 of ~2500 values being incorrectly guessed, roughly 5%. A more balance data sets of 0,1 could be more useful. Given the model never predicts a stoke, it can never predict a false positive or a true positive, therefore an ROC curve gives little additional insight. 
+
+Changing the threshold probability from 0.5 would drastically affect the results and prediction of our model. While, both the Kaggle resource and many medical studies express that 0.5 is industry standard unless reason to change it.
+
+
+```{r}
+roc_curve <- roc(df.test$stroke, predict(model, newdata = df.test, type = "response"))
+plot(roc_curve, main = 'ROC Curve')
+auc(roc_curve)
+```
+An ROC curve shows the trade off between false positives and true positives. An ideal ROC curve would maximize area trapped underneath the lines specificity=0 and sensitivity = 1, measures by the AUC score. Given the models AUC score is 0.7 > 0.5, our model is better than randomized guessing, but clinically useless. 
+
+For prediction, we applied the model to the training dataset and obtained reliable estimates. However, additional validation using a test dataset or cross-validation would provide a better assessment of the model's generalizability and potential overfitting.
+
+# Conclusion
+Our generalized linear model (binary logit) effectively predicts the likelihood of stroke using logistic regression based on multiple health and demographic predictors. The model passed key assumptions including response variable binarity and sufficient sample size. Multicollinearity was evaluated using VIF values, and no major violations were observed. The model showed a lackluster reduction in deviance when compared to the null model, indicating that the predictors contribute minimally valuable information. A notable strength of the model is its simplicity and binary variables such as gender, marital status, and residence type allow for clear understanding of feature impacts.  However, the model also showed negative sides, mainly performance. The presence of unexplained variance suggests that some important predictors were not included. Predictors such as age or glucose levels could improve predictive performance if they were kept. In future work, incorporating more feature selection, addressing non-linearity, and using advanced classifiers could improve both accuracy.  
+
+
+# References
+- https://www.kaggle.com/datasets/fedesoriano/stroke-prediction-dataset/data
+- https://r4ds.github.io/bookclub-islr/addendum---logistic-regression-assumptions.html
+- https://www.sthda.com/english/articles/36-classification-methods-essentials/151-logistic-regression-essentials-in-r/
+
+
+
+
+
+
+
+

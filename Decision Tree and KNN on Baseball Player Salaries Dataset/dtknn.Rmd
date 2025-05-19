@@ -1,0 +1,247 @@
+---
+title: "Comparing Decision Tree and KNN Models on Baseball Dataset"
+output:
+  html_document:
+    df_print: paged
+  pdf_document:
+    number_sections: true
+---
+
+```{r, echo=FALSE, message=FALSE}
+library(knitr)
+library(caret)
+library(rpart)
+library(pROC)
+library(rattle)
+library(randomForest)
+library(xgboost) 
+library(ggplot2)
+library(Hmisc)
+library(gridExtra)
+library(rpart.plot)
+library(class)
+library(FNN)
+rand.v = "4.3.2"
+seed.val = 123456
+```
+
+# Introduction
+
+Decision trees are a type of supervised learning algorithm used for predictive modeling. In this analysis, a decision tree model is used to predict the salaries of professional baseball players based on various performance metrics and demographic features. The model follows a “tree-like” structure, where the data is recursively split into smaller subsets based on feature values until it reaches the terminal nodes or leaves, each representing a predicted salary value.
+
+K-Nearest Neighbors (KNN) algorithms classify data points by finding the K closest data points to the query point and making a prediction based on the attributes of those neighbors. The number of neighbors used is variable and can be decided or optimized for. In this regression context, the prediction will be the average of the neighbors' value (salary).
+
+The dataset includes 263 records of Major League Baseball (MLB) players, collected in 1986, containing multiple features relevant to a player's performance and their career history.
+
+To perform the analysis, several R packages were utilized for data preprocessing, modeling, and visualization. The `caret`, `FNN` and `rpart` packages supported model development, `ggplot2` and `rpart` were used for creating visualizations, and `knitr` assisted in generating the final report.
+
+For the decision tree model, the model includes 5 terminal nodes (leafs) with 4 splitting criterion. The critical parameter is 0.02281621 found through optimization. The main measure of accuracy was RMSE, the average deviation between predicted and actual salaries. The RMSE was $404.99k, suggests a moderate predication error given salaries range from $67.5k to $2,246k. 
+For the KNN model, the best value of K was 19 found through optimization. The main measure of accuracy was RMSE, the average deviation between predicted and actual salaries. The RMSE was $661, suggests a minimal predication error given salaries range from $67.5k to $2,246k.
+
+# Data description
+
+```{r}
+bb.df <- read.csv("baseball.csv")
+bb.df <- na.omit(bb.df)
+cat("Data Points:", nrow(bb.df) - sum(is.na(bb.df)))
+```
+
+## Variables
+
+The set contains 263 data points. Our response variable is salary - the player's annual salary on opening day in 1987 reported in thousands of dollars. Below are descriptions of the features:
+
+-   AtBat: \# of times at bat in 1986 season
+-   Hits: \# of hits in 1986 season
+-   HmRun: \# of home runs in 1986 season
+-   Runs: \# of runs in 1986 season
+-   RBI: \# of runs batted in in 1986 season
+-   Walks: \# of walks in 1986 season
+-   PutOuts: \# of put outs in 1986 season
+-   Assists: \# of assists in 1986 season
+-   Errors: \# of errors in 1986 season
+-   Years: \# of years of experiences in MLB
+-   CAtBat: \# of times at bat during career
+-   CHits: \# of hits during career
+-   CHmRun: \# of home runs during career
+-   CRuns: \# of runs during career
+-   CRBI: \# of runs batted in during career
+-   CWalks: \# of walks during career
+-   League: Player's league at end of 1986 season - {A: American, N: National}
+-   NewLeague: Player's league at beginning of 1987 season - {A: American, N: National}
+-   Division: Player's division at end of 1986 season - {E: East, W: West}
+
+## Dataset
+
+```{r }
+bb.df$League <- as.factor(bb.df$League)
+bb.df$NewLeague <- as.factor(bb.df$NewLeague)
+bb.df$Division <- as.factor(bb.df$Division)
+head(bb.df, 3)
+```
+
+## Encoding Catagorical Variables 
+
+We encoded the catagorical variables for KNN down the line. 
+
+-   League: Player's league at end of 1986 season - {0: American, 1: National}
+-   NewLeague: Player's league at beginning of 1987 season - {0: American, 1: National}
+-   Division: Player's division at end of 1986 season - {0: East, 1: West}
+
+```{r }
+hold <- bb.df$Salary
+dummies <- dummyVars(Salary ~ ., data = bb.df)
+bb.df <- as.data.frame(predict(dummies, newdata = bb.df))
+bb.df$Salary <- hold
+head(bb.df, 3)
+```
+
+# Exploratory Analysis
+
+## Features
+
+We conducted an exploratory analysis of the numerical features to understand their distributions ahead of creating our decision tree. League, NewLeague, and Division were all excluded since they are catagorical variables. 
+
+```{r message=FALSE, warning=FALSE}
+hist_vars <- c("AtBat", "Hits", "HmRun", "Runs", "RBI", "Walks", "PutOuts", "Assists",
+               "Errors", "Years", "CAtBat", "CHits", "CHmRun", "CRuns", "CRBI", "CWalks")
+
+plots <- lapply(hist_vars, function(col) {
+  ggplot(bb.df, aes_string(x = col)) +
+    geom_histogram(fill = "steelblue", color = "black", bins = 30) +
+    ggtitle(paste("Histogram of", col)) +
+    theme_minimal() +
+    theme(plot.title = element_text(size = 10))
+})
+grid.arrange(grobs = plots[1:4], nrow = 1)
+grid.arrange(grobs = plots[5:8], nrow = 1)
+grid.arrange(grobs = plots[9:12], nrow = 1)
+grid.arrange(grobs = plots[13:16], nrow = 1)
+```
+
+From the histograms above, we can see that the features that are based on a singular season mostly have a uniform or normal distribution. However, the features based on career performance exhibit a right-skewed distribution. 
+
+This may indicate outliers - "superstars" that have had exceptional careers. Season over season these superstars are leading in certain features, which contributes to the player's career-long related features to be much greater than peers. 
+
+We do not believe these outliers will create issues within our model, such superstars should be paid in excess. We do note that features unrelated to performance may impact their wages. For example, a superstar that is a household name and thus sells more jerseys, tickets, etc. may be paid higher than another player despite worse performance in a single season. 
+
+
+## Response Variable
+
+The response variable in this analysis is Salary, which represents the annual salary (in thousands of USD) of Major League Baseball (MLB) players for the 1987 season. To understand the distribution of salaries, we first examined the summary statistics.
+
+```{r}
+summary(bb.df$Salary)
+```
+
+```{r message=FALSE, out.width="50%", out.height="50%", fig.align = 'center', fig.cap="Distribution of Salary."}
+boxplot(bb.df$Salary)
+```
+
+These values indicate that the salary data is right-skewed, with a small number of players earning significantly more than the rest. The median salary is \$425,000, while the mean is higher at approximately \$535,900, suggesting the presence of high-earning outliers. We see these illustreated in the boxplot where there are serveral outliers making above 1.5 million dollars. 
+
+```{r message=FALSE, out.width="50%", out.height="50%", fig.align = 'center', fig.cap="Distribution of Salary."}
+hist(bb.df$Salary, 
+ col="gray", 
+ border="black",
+ prob = TRUE, 
+ xlab = "$1000")
+lines(density(bb.df$Salary),
+ lwd = 2,
+ col = "black")
+```
+
+The histogram helps illustrate the overall shape of the distribution, with most players earning between \$100,000 and \$800,000. These visualizations confirm that salary is not normally distributed and should be treated with care during modeling, especially when considering transformations or assumptions of normality.
+
+# Modelling
+
+To evaluate which model is more effective at predicting professional baseball player salaries, we compare the performance of a Decision Tree model and a K-Nearest Neighbors (KNN) regression model.
+
+## Training and Testing Sets
+
+
+```{r}
+RNGversion(rand.v)
+set.seed(seed.val)
+trainIndex <- createDataPartition(bb.df$Salary, p = 0.7, list = FALSE)
+train <- bb.df[trainIndex, ]
+test  <- bb.df[-trainIndex, ]
+```
+
+
+## Fitting Decision Tree
+
+```{r}
+trctrl <- trainControl(method = "cv", number = 10)
+
+tree <- train(
+  Salary ~ .,
+  data = train,
+  method = "rpart",
+  trControl = trctrl,
+  tuneLength = 20,
+  metric = "RMSE"
+)
+print(tree)
+plot(tree)
+rpart.plot(tree$finalModel)
+```
+
+The decision tree has 5 terminal or leaf nodes as shown in the graph above. 
+
+## Evaluating Decision Tree
+
+```{r}
+tree.pred <- predict(tree, newdata = test)
+tree.rmse <- sqrt(mean((tree.pred - test$Salary)^2))
+tree.rmse
+```
+
+The Root Mean Squared Error (RMSE) for the decision tree model is approximately 404.99 (in thousands of dollars). This metric reflects the average deviation between the model's predicted salaries and the actual salaries. With salaries in the dataset ranging from $67.5K to $2.46M, an RMSE of $404.99K suggests a moderate level of prediction error, meaning that, on average, the model's salary predictions are off by about $405K.
+
+## Fitting KNN
+
+### Model Fitting
+
+```{r}
+preProc <- preProcess(train, method = c("center", "scale"))
+train.norm <- predict(preProc, train)
+test.norm <- predict(preProc, test)
+train.X <- train.norm[, -which(names(train) == "Salary")]
+train.Y <- train.norm$Salary
+test.X <- test.norm[, -which(names(test) == "Salary")]
+test.Y <- test.norm$Salary
+```
+
+
+```{r}
+knn <- train(
+  Salary ~ .,
+  data = train.norm,
+  method = "knn",
+  trControl = trainControl(method = "cv", number = 10),
+  tuneLength = 15,
+  metric = "RMSE"
+)
+print(knn$results)
+```
+
+
+## Evaluating KNN
+
+```{r}
+best_rmse <- knn$results$RMSE[which.min(knn$results$RMSE)]
+best_K <- knn$results$K[which.min(knn$results$RMSE)]
+cat("Best RMSE: ", best_rmse, "Best K:", knn$results$k[which.min(knn$results$RMSE)])
+```
+
+The Root Mean Squared Error (RMSE) for the KNN model is approximately 0.661 (in thousands of dollars). This metric indicates the average deviation between the model's predicted salaries and the actual salaries. Since the salaries in the dataset range from $67.5K to $2.46M, an RMSE of 0.661K (or $661) suggests that, on average, the model's salary predictions are off by about $661.
+
+# Conclusion
+For the decision tree model, the main measure of accuracy was RMSE, the average deviation between predicted and actual salaries. The RMSE was $404.99k, suggests a moderate predication error given salaries range from $67.5k to $2,246k. We believe such error was driven by decision tree's sensitivity to noisy data. Outlier points - "superstars" - are noisy, introducing significant error. The model could be refined by removing these points, but we believe this could distort the data set. Instead, we believe additional features that help explain high salaries even given a year of underperformance (awards/hype, jersey sales, etc.) should be introduced. These were not provided in our data set. Future studies should collect information on these features as well. 
+
+For the KNN model, the main measure of accuracy was RMSE, the average deviation between predicted and actual salaries. The RMSE was $661, suggests a minimal predication error given salaries range from $67.5k to $2,246k. We believe such accuracy is logical as the dataset is relatively small (computation power is not a concern), features are relatively uncorrelated, and the data is well balanced (no class dominance). Further exploration into predictor variable correlation could further refine the model and improve performance. Additionally, analyzing how the model performs on much, much larger data could provide valuable. 
+
+# References
+
+- https://www.kaggle.com/code/nihandincer/hitters-baseball-data
+- https://www.edureka.co/blog/knn-algorithm-in-r/
